@@ -17,14 +17,20 @@ use std::cell::RefCell;
 use std::fs;
 use std::io::Write;
 
+use std::result::Result::Ok;
+
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::Graphics::GdiPlus::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::PCWSTR;
 
 use canvas::{Canvas, SourceInfo};
 use dwm::Thumbnail;
+
+// GDI+ token
+static mut GDIPLUS_TOKEN: usize = 0;
 
 // Animation constants
 const TIMER_FADE_IN: usize = 1;
@@ -99,6 +105,7 @@ impl AppState {
                         width: thumb.source_width,
                         height: thumb.source_height,
                         title: winfo.title.clone(),
+                        icon: winfo.icon,
                     });
                     self.thumbnails.push(thumb);
                 }
@@ -260,8 +267,38 @@ unsafe extern "system" fn wndproc(
         }
 
         WM_KEYDOWN => {
-            if wparam.0 as u32 == 0x1B {
+            let vk = wparam.0 as u32;
+            if vk == 0x1B {
+                // ESC - close the window
                 with_state(|s| s.hide());
+            } else if vk == 0x25 || vk == 0x26 {
+                // Left or Up arrow - previous window
+                with_state(|s| {
+                    s.canvas.prev_window();
+                    s.update_all_thumbnails();
+                    let _ = InvalidateRect(hwnd, None, true);
+                });
+            } else if vk == 0x27 || vk == 0x28 {
+                // Right or Down arrow - next window
+                with_state(|s| {
+                    s.canvas.next_window();
+                    s.update_all_thumbnails();
+                    let _ = InvalidateRect(hwnd, None, true);
+                });
+            } else if vk == 0x0D {
+                // Enter key - activate the selected window
+                with_state(|s| {
+                    if let Some(idx) = s.canvas.get_active_window() {
+                        if idx < s.canvas.windows.len() {
+                            let ti = s.canvas.windows[idx].thumb_index;
+                            if ti < s.thumbnails.len() {
+                                let target = s.thumbnails[ti].source_hwnd;
+                                s.hide();
+                                window::activate_window(target);
+                            }
+                        }
+                    }
+                });
             }
             LRESULT(0)
         }
@@ -272,10 +309,7 @@ unsafe extern "system" fn wndproc(
                 let hit = s.canvas.hit_test(x, y);
                 s.click_target = hit;
                 s.drag_moved = false;
-                if let Some(idx) = hit {
-                    s.canvas.start_drag(idx, x, y);
-                    SetCapture(hwnd);
-                }
+                // Window dragging disabled - only canvas panning with right-click
             });
             LRESULT(0)
         }
@@ -342,13 +376,25 @@ unsafe extern "system" fn wndproc(
         WM_MOUSEWHEEL => {
             let (x, y) = input::mouse_coords(lparam.0);
             let delta = input::wheel_delta(wparam.0);
+            let ctrl_pressed = (wparam.0 & 0x0008) != 0; // MK_CONTROL
+
             with_state(|s| {
-                let mut pt = POINT {
-                    x: x as i32,
-                    y: y as i32,
-                };
-                let _ = ScreenToClient(hwnd, &mut pt);
-                s.canvas.zoom_at(pt.x as f64, pt.y as f64, delta);
+                if ctrl_pressed {
+                    // Ctrl+Wheel = zoom
+                    let mut pt = POINT {
+                        x: x as i32,
+                        y: y as i32,
+                    };
+                    let _ = ScreenToClient(hwnd, &mut pt);
+                    s.canvas.zoom_at(pt.x as f64, pt.y as f64, delta);
+                } else {
+                    // Wheel without Ctrl = navigate through windows
+                    if delta > 0.0 {
+                        s.canvas.prev_window();
+                    } else {
+                        s.canvas.next_window();
+                    }
+                }
                 s.update_all_thumbnails();
                 let _ = InvalidateRect(hwnd, None, true);
             });
@@ -356,28 +402,8 @@ unsafe extern "system" fn wndproc(
         }
 
         WM_ERASEBKGND => {
-            let hdc = HDC(wparam.0 as *mut _);
-            let painted = with_state(|s| {
-                if !s.bg_bitmap.0.is_null() {
-                    let hdc_mem = CreateCompatibleDC(hdc);
-                    let old = SelectObject(hdc_mem, s.bg_bitmap);
-                    let _ = BitBlt(
-                        hdc, 0, 0,
-                        s.canvas.screen_w, s.canvas.screen_h,
-                        hdc_mem, 0, 0, SRCCOPY,
-                    );
-                    SelectObject(hdc_mem, old);
-                    let _ = DeleteDC(hdc_mem);
-                    true
-                } else {
-                    false
-                }
-            });
-            if painted == Some(true) {
-                LRESULT(1)
-            } else {
-                DefWindowProcW(hwnd, msg, wparam, lparam)
-            }
+            // Don't erase - we'll handle all painting in WM_PAINT to prevent flicker
+            LRESULT(1)
         }
 
         WM_PAINT => {
@@ -385,12 +411,67 @@ unsafe extern "system" fn wndproc(
             let hdc = BeginPaint(hwnd, &mut ps);
 
             with_state(|s| {
+                // Use double buffering: draw to off-screen bitmap first
+                let hdc_buffer = CreateCompatibleDC(hdc);
+                let hbm_buffer = CreateCompatibleBitmap(hdc, s.canvas.screen_w, s.canvas.screen_h);
+                let _old_buffer = SelectObject(hdc_buffer, hbm_buffer);
+
+                // Draw background first (captured screen)
+                if !s.bg_bitmap.0.is_null() {
+                    let hdc_mem = CreateCompatibleDC(hdc_buffer);
+                    let old = SelectObject(hdc_mem, s.bg_bitmap);
+
+                    // Draw the captured screen to buffer
+                    let _ = BitBlt(
+                        hdc_buffer, 0, 0,
+                        s.canvas.screen_w, s.canvas.screen_h,
+                        hdc_mem, 0, 0, SRCCOPY,
+                    );
+                    SelectObject(hdc_mem, old);
+                    let _ = DeleteDC(hdc_mem);
+
+                    // Apply dark semi-transparent overlay (blur effect) to buffer
+                    unsafe {
+                        let mut graphics: *mut GpGraphics = std::ptr::null_mut();
+                        if GdipCreateFromHDC(hdc_buffer, &mut graphics as *mut _ as *mut _) == Status(0) {
+                            // Draw semi-transparent dark rectangle over entire screen
+                            let mut brush: *mut GpSolidFill = std::ptr::null_mut();
+                            // ARGB: 60% opacity black (0x99000000)
+                            if GdipCreateSolidFill(0x99000000, &mut brush as *mut _ as *mut _) == Status(0) {
+                                let brush_ptr = brush as *mut GpBrush;
+                                let _ = GdipFillRectangleI(
+                                    graphics,
+                                    brush_ptr,
+                                    0, 0,
+                                    s.canvas.screen_w,
+                                    s.canvas.screen_h
+                                );
+                                let _ = GdipDeleteBrush(brush_ptr);
+                            }
+                            let _ = GdipDeleteGraphics(graphics);
+                        }
+                    }
+                }
+
+                // Copy the entire buffer to the screen (background + blur only)
+                let _ = BitBlt(
+                    hdc, 0, 0,
+                    s.canvas.screen_w, s.canvas.screen_h,
+                    hdc_buffer, 0, 0, SRCCOPY,
+                );
+
+                // Clean up buffer
+                SelectObject(hdc_buffer, _old_buffer);
+                let _ = DeleteObject(hbm_buffer);
+                let _ = DeleteDC(hdc_buffer);
+
+                // Now draw borders and text directly to screen (on top of DWM thumbnails)
                 SetBkMode(hdc, TRANSPARENT);
                 SetTextColor(hdc, COLORREF(0x00E0E0E0));
 
                 let font_name = window::wide_string("Segoe UI");
                 let font = CreateFontW(
-                    18, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 0, 0,
+                    24, 0, 0, 0, 700, 0, 0, 0, 0, 0, 0, 0, 0,
                     PCWSTR(font_name.as_ptr()),
                 );
                 let old_font = SelectObject(hdc, font);
@@ -402,32 +483,119 @@ unsafe extern "system" fn wndproc(
                     1.0
                 };
 
-                for cw in &s.canvas.windows {
+                for (idx, cw) in s.canvas.windows.iter().enumerate() {
                     let rect = s.canvas.canvas_to_screen_rect(cw, scale);
+                    let is_active = s.canvas.get_active_window() == Some(idx);
 
-                    let pen = CreatePen(PS_SOLID, 2, COLORREF(0x00707070));
-                    let old_pen = SelectObject(hdc, pen);
-                    let null_brush = GetStockObject(NULL_BRUSH);
-                    let old_brush = SelectObject(hdc, null_brush);
-                    let _ = Rectangle(
-                        hdc,
-                        rect.left - 1, rect.top - 1,
-                        rect.right + 1, rect.bottom + 1,
-                    );
-                    SelectObject(hdc, old_pen);
-                    SelectObject(hdc, old_brush);
-                    let _ = DeleteObject(pen);
+                    // Use GDI+ for anti-aliased rounded corners
+                    unsafe {
+                        let mut graphics: *mut GpGraphics = std::ptr::null_mut();
+                        if GdipCreateFromHDC(hdc, &mut graphics as *mut _ as *mut _) == Status(0) {
+                            let _ = GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias);
 
+                            let mut pen: *mut GpPen = std::ptr::null_mut();
+                            // Active window gets brighter, thicker border
+                            let (color, width) = if is_active {
+                                (0xFF00D4FF, 5.0) // Cyan highlight
+                            } else {
+                                (0x00, 5.0) // Transparent
+                            };
+                            if GdipCreatePen1(color, width, UnitPixel, &mut pen as *mut _ as *mut _) == Status(0) {
+                                let x = rect.left as f32;
+                                let y = rect.top as f32;
+                                let w = (rect.right - rect.left) as f32;
+                                let h = (rect.bottom - rect.top) as f32;
+
+                                // Draw rounded rectangle using path with arc and line commands
+                                let mut path: *mut GpPath = std::ptr::null_mut();
+                                if GdipCreatePath(FillModeAlternate, &mut path as *mut _ as *mut _) == Status(0) {
+                                    let r = 16.0f32;
+                                    let x2 = x + w;
+                                    let y2 = y + h;
+
+                                    // Build rounded rectangle with proper arc calculations
+                                    // Top-right corner
+                                    let _ = GdipAddPathArc(path, x2 - 2.0 * r, y, 2.0 * r, 2.0 * r, 270.0, 90.0);
+                                    // Right edge
+                                    let _ = GdipAddPathLine(path, x2, y + r, x2, y2 - r);
+                                    // Bottom-right corner
+                                    let _ = GdipAddPathArc(path, x2 - 2.0 * r, y2 - 2.0 * r, 2.0 * r, 2.0 * r, 0.0, 90.0);
+                                    // Bottom edge
+                                    let _ = GdipAddPathLine(path, x2 - r, y2, x + r, y2);
+                                    // Bottom-left corner
+                                    let _ = GdipAddPathArc(path, x, y2 - 2.0 * r, 2.0 * r, 2.0 * r, 90.0, 90.0);
+                                    // Left edge
+                                    let _ = GdipAddPathLine(path, x, y2 - r, x, y + r);
+                                    // Top-left corner
+                                    let _ = GdipAddPathArc(path, x, y, 2.0 * r, 2.0 * r, 180.0, 90.0);
+                                    // Top edge
+                                    let _ = GdipAddPathLine(path, x + r, y, x2 - r, y);
+                                    let _ = GdipClosePathFigure(path);
+
+                                    let _ = GdipDrawPath(graphics, pen, path);
+                                    let _ = GdipDeletePath(path);
+                                }
+                                let _ = GdipDeletePen(pen);
+                            }
+                            let _ = GdipDeleteGraphics(graphics);
+                        }
+                    }
+
+                    let icon_size = 20;
+                    let icon_spacing = 4;
+                    let text_top = rect.bottom + 4;
+
+                    // Measure text width first
                     let mut tw: Vec<u16> = cw.title.encode_utf16().collect();
+                    let mut measure_rect = RECT {
+                        left: 0,
+                        top: 0,
+                        right: 0,
+                        bottom: 0,
+                    };
+                    let _ = DrawTextW(hdc, &mut tw, &mut measure_rect, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+                    let text_width = measure_rect.right - measure_rect.left;
+
+                    // Calculate total width and center position
+                    let total_width = if !cw.icon.is_invalid() {
+                        text_width + icon_size + icon_spacing
+                    } else {
+                        text_width
+                    };
+                    let start_x = rect.left + (rect.right - rect.left - total_width) / 2;
+
+                    // Draw icon to the left of text
+                    if !cw.icon.is_invalid() {
+                        let icon_x = start_x;
+                        let icon_y = text_top;
+                        let _ = DrawIconEx(
+                            hdc,
+                            icon_x,
+                            icon_y,
+                            cw.icon,
+                            icon_size,
+                            icon_size,
+                            0,
+                            HBRUSH::default(),
+                            DI_NORMAL,
+                        );
+                    }
+
+                    // Draw text to the right of icon (or centered if no icon)
+                    let text_x = if !cw.icon.is_invalid() {
+                        start_x + icon_size + icon_spacing
+                    } else {
+                        start_x
+                    };
                     let mut tr = RECT {
-                        left: rect.left,
-                        top: rect.bottom + 4,
+                        left: text_x,
+                        top: text_top,
                         right: rect.right,
-                        bottom: rect.bottom + 26,
+                        bottom: text_top + 22,
                     };
                     DrawTextW(
                         hdc, &mut tw, &mut tr,
-                        DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
+                        DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
                     );
                 }
 
@@ -485,6 +653,12 @@ unsafe extern "system" fn wndproc(
                     s.bg_bitmap = HBITMAP::default();
                 }
             });
+            unsafe {
+                if GDIPLUS_TOKEN != 0 {
+                    let _ = GdiplusShutdown(GDIPLUS_TOKEN);
+                    GDIPLUS_TOKEN = 0;
+                }
+            }
             PostQuitMessage(0);
             LRESULT(0)
         }
@@ -500,6 +674,24 @@ fn main() {
     }));
 
     log_debug("=== Win-Canvas starting ===");
+
+    // Initialize GDI+
+    unsafe {
+        let input = GdiplusStartupInput {
+            GdiplusVersion: 1,
+            DebugEventCallback: 0,
+            SuppressBackgroundThread: false.into(),
+            SuppressExternalCodecs: false.into(),
+        };
+        let mut token = 0usize;
+        let result = GdiplusStartup(&mut token, &input, std::ptr::null_mut());
+        if result == Status(0) {
+            GDIPLUS_TOKEN = token;
+            log_debug("GDI+ initialized successfully");
+        } else {
+            log_debug(&format!("Failed to initialize GDI+: {:?}", result));
+        }
+    }
 
     let (screen_w, screen_h) = window::get_screen_size();
     log_debug(&format!("Screen: {}x{}", screen_w, screen_h));

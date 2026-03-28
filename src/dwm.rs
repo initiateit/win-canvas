@@ -32,12 +32,22 @@ impl Thumbnail {
     }
 
     /// Update the thumbnail display properties (position/size on the destination window).
+    /// The rect is inset to create negative space for rounded corners.
     pub fn update(&self, dest_rect: RECT, opacity: u8, client_area_only: bool) -> windows::core::Result<()> {
         unsafe {
+            // Inset by 16px (corner radius) to create negative space for rounded corners
+            // The background shows through at the corners
+            let inset_rect = RECT {
+                left: dest_rect.left + 16,
+                top: dest_rect.top + 16,
+                right: dest_rect.right - 16,
+                bottom: dest_rect.bottom - 16,
+            };
+
             let mut props = DWM_THUMBNAIL_PROPERTIES::default();
             props.dwFlags = DWM_TNP_VISIBLE | DWM_TNP_RECTDESTINATION | DWM_TNP_OPACITY;
             props.fVisible = true.into();
-            props.rcDestination = dest_rect;
+            props.rcDestination = inset_rect;
             props.opacity = opacity;
 
             if client_area_only {

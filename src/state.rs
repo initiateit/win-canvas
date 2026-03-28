@@ -1,24 +1,12 @@
-//! State persistence — save/load canvas layout across sessions.
+//! State persistence — only save zoom level.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct SavedWindowPos {
-    pub x: f64,
-    pub y: f64,
-    pub w: f64,
-    pub h: f64,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SavedCanvasState {
     pub zoom: f64,
-    pub pan_x: f64,
-    pub pan_y: f64,
-    pub windows: HashMap<String, SavedWindowPos>,
 }
 
 fn state_path() -> PathBuf {

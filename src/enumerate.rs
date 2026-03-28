@@ -1,10 +1,11 @@
 //! Enumerate visible top-level windows for the canvas.
 
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, TRUE};
+use windows::Win32::Foundation::{BOOL, HWND, LPARAM, TRUE, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowLongW, GetWindowTextLengthW, GetWindowTextW, IsIconic, IsWindowVisible,
-    GWL_EXSTYLE, GWL_STYLE, WS_EX_TOOLWINDOW, WS_EX_NOACTIVATE, WS_CHILD,
+    EnumWindows, GetClassLongPtrW, GetWindowLongW, GetWindowTextLengthW, GetWindowTextW,
+    IsIconic, IsWindowVisible, SendMessageW, GWL_EXSTYLE, GWL_STYLE, ICON_BIG, GCL_HICON,
+    WM_GETICON, WS_EX_TOOLWINDOW, WS_EX_NOACTIVATE, WS_CHILD, HICON,
 };
 
 /// Information about an enumerated window.
@@ -12,6 +13,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 pub struct WindowInfo {
     pub hwnd: HWND,
     pub title: String,
+    pub icon: HICON,
 }
 
 /// Enumerate all visible top-level application windows.
@@ -87,7 +89,19 @@ unsafe extern "system" fn enum_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
         return TRUE;
     }
 
-    results.push(WindowInfo { hwnd, title });
+    // Get window icon (try application icon first, then fall back to class icon)
+    let icon = unsafe {
+        let app_icon = SendMessageW(hwnd, WM_GETICON, WPARAM(ICON_BIG as usize), LPARAM(0));
+        let app_icon_isize = app_icon.0 as isize;
+        if app_icon_isize != 0 {
+            HICON(app_icon_isize as *mut _)
+        } else {
+            let class_icon = GetClassLongPtrW(hwnd, GCL_HICON);
+            HICON(class_icon as *mut _)
+        }
+    };
+
+    results.push(WindowInfo { hwnd, title, icon });
 
     TRUE
 }

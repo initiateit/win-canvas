@@ -1,9 +1,9 @@
 //! Canvas state management — pan, zoom, layout, and coordinate transforms.
 
-use std::collections::HashMap;
 use windows::Win32::Foundation::RECT;
+use windows::Win32::UI::WindowsAndMessaging::HICON;
 
-use crate::state::{SavedCanvasState, SavedWindowPos};
+use crate::state::SavedCanvasState;
 
 /// Represents a window's position and size on the canvas (in canvas-space coordinates).
 #[derive(Debug, Clone)]
@@ -14,6 +14,7 @@ pub struct CanvasWindow {
     pub h: f64,
     pub thumb_index: usize,
     pub title: String,
+    pub icon: HICON,
     pub dragging: bool,
 }
 
@@ -23,6 +24,7 @@ pub struct SourceInfo {
     pub width: i32,
     pub height: i32,
     pub title: String,
+    pub icon: HICON,
 }
 
 /// The canvas state.
@@ -43,6 +45,7 @@ pub struct Canvas {
     pub pan_start_y: f64,
     pub pan_origin_x: f64,
     pub pan_origin_y: f64,
+    pub active_window: Option<usize>, // Currently active/selected window
 }
 
 impl Canvas {
@@ -64,10 +67,11 @@ impl Canvas {
             pan_start_y: 0.0,
             pan_origin_x: 0.0,
             pan_origin_y: 0.0,
+            active_window: None,
         }
     }
 
-    /// Layout windows in a grid, then apply any saved positions on top.
+    /// Layout windows in a single horizontal row.
     pub fn layout_grid(&mut self, sources: &[SourceInfo], saved: Option<&SavedCanvasState>) {
         self.windows.clear();
 
@@ -76,17 +80,17 @@ impl Canvas {
             return;
         }
 
-        let cols = (count as f64).sqrt().ceil() as usize;
-        let rows = (count + cols - 1) / cols;
+        // Single horizontal row (like Alt+Tab)
+        let cols = count;
+        let _rows = 1;
         let thumb_w = 400.0;
-        let padding = 40.0;
+        let padding = 80.0;
         let grid_w = cols as f64 * (thumb_w + padding) - padding;
         let start_x = -(grid_w / 2.0);
-        let start_y = -(rows as f64 * 300.0 / 2.0);
+        let start_y = 0.0; // Centered vertically
 
         for (i, src) in sources.iter().enumerate() {
-            let col = i % cols;
-            let row = i / cols;
+            let col = i;
             let aspect = if src.height > 0 {
                 src.width as f64 / src.height as f64
             } else {
@@ -95,7 +99,7 @@ impl Canvas {
             let w = thumb_w;
             let h = w / aspect;
             let x = start_x + col as f64 * (thumb_w + padding) + w / 2.0;
-            let y = start_y + row as f64 * (h + padding) + h / 2.0;
+            let y = start_y; // All windows on same vertical line
 
             self.windows.push(CanvasWindow {
                 x,
@@ -104,50 +108,59 @@ impl Canvas {
                 h,
                 thumb_index: src.thumb_index,
                 title: src.title.clone(),
+                icon: src.icon,
                 dragging: false,
             });
         }
 
-        // Apply saved state if available
+        // Apply saved zoom state, always center the canvas
         if let Some(saved) = saved {
-            self.pan_x = saved.pan_x;
-            self.pan_y = saved.pan_y;
             self.zoom = saved.zoom;
-
-            for cw in &mut self.windows {
-                if let Some(pos) = saved.windows.get(&cw.title) {
-                    cw.x = pos.x;
-                    cw.y = pos.y;
-                    cw.w = pos.w;
-                    cw.h = pos.h;
-                }
-            }
+            self.pan_x = self.screen_w as f64 / 2.0;
+            self.pan_y = self.screen_h as f64 / 2.0;
         } else {
             self.pan_x = self.screen_w as f64 / 2.0;
             self.pan_y = self.screen_h as f64 / 2.0;
-            self.zoom = 0.8;
+            self.zoom = 1.0; // Start at 100% zoom for better visibility
+        }
+
+        // Set the first window as active, or keep previously active if valid
+        if self.active_window.is_none() || self.active_window.unwrap() >= self.windows.len() {
+            self.active_window = if self.windows.is_empty() { None } else { Some(0) };
         }
     }
 
-    /// Export current state for saving.
-    pub fn to_saved_state(&self) -> SavedCanvasState {
-        let mut windows = HashMap::new();
-        for cw in &self.windows {
-            windows.insert(
-                cw.title.clone(),
-                SavedWindowPos {
-                    x: cw.x,
-                    y: cw.y,
-                    w: cw.w,
-                    h: cw.h,
-                },
-            );
+    /// Navigate to the next window (cycling)
+    pub fn next_window(&mut self) {
+        if self.windows.is_empty() {
+            return;
         }
+        let current = self.active_window.unwrap_or(0);
+        self.active_window = Some((current + 1) % self.windows.len());
+    }
+
+    /// Navigate to the previous window (cycling)
+    pub fn prev_window(&mut self) {
+        if self.windows.is_empty() {
+            return;
+        }
+        let current = self.active_window.unwrap_or(0);
+        self.active_window = Some(if current == 0 {
+            self.windows.len() - 1
+        } else {
+            current - 1
+        });
+    }
+
+    /// Get the currently active window index
+    pub fn get_active_window(&self) -> Option<usize> {
+        self.active_window
+    }
+
+    /// Export current state for saving (only zoom).
+    pub fn to_saved_state(&self) -> SavedCanvasState {
         SavedCanvasState {
             zoom: self.zoom,
-            pan_x: self.pan_x,
-            pan_y: self.pan_y,
-            windows,
         }
     }
 
