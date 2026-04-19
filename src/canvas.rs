@@ -46,6 +46,12 @@ pub struct Canvas {
     pub pan_origin_x: f64,
     pub pan_origin_y: f64,
     pub active_window: Option<usize>, // Currently active/selected window
+    // Carousel scrolling state
+    target_pan_x: f64,
+    scroll_active: bool,
+    scroll_start_pan: f64,
+    scroll_target: f64,
+    scroll_progress: f64,
 }
 
 impl Canvas {
@@ -68,6 +74,11 @@ impl Canvas {
             pan_origin_x: 0.0,
             pan_origin_y: 0.0,
             active_window: None,
+            target_pan_x: 0.0,
+            scroll_active: false,
+            scroll_start_pan: 0.0,
+            scroll_target: 0.0,
+            scroll_progress: 0.0,
         }
     }
 
@@ -124,9 +135,15 @@ impl Canvas {
             self.zoom = 1.0; // Start at 100% zoom for better visibility
         }
 
-        // Set the first window as active, or keep previously active if valid
+        self.target_pan_x = self.pan_x;
+
+        // Set the middle window as active, or keep previously active if valid
         if self.active_window.is_none() || self.active_window.unwrap() >= self.windows.len() {
-            self.active_window = if self.windows.is_empty() { None } else { Some(0) };
+            self.active_window = if self.windows.is_empty() {
+                None
+            } else {
+                Some(self.windows.len() / 2) // Middle window
+            };
         }
     }
 
@@ -137,6 +154,7 @@ impl Canvas {
         }
         let current = self.active_window.unwrap_or(0);
         self.active_window = Some((current + 1) % self.windows.len());
+        self.scroll_to_active_window();
     }
 
     /// Navigate to the previous window (cycling)
@@ -150,11 +168,86 @@ impl Canvas {
         } else {
             current - 1
         });
+        self.scroll_to_active_window();
     }
 
     /// Get the currently active window index
     pub fn get_active_window(&self) -> Option<usize> {
         self.active_window
+    }
+
+    /// Set the active window by index and scroll to it
+    pub fn set_active_window(&mut self, index: usize) {
+        if index < self.windows.len() {
+            self.active_window = Some(index);
+            self.scroll_to_active_window();
+        }
+    }
+
+    /// Start smooth scroll animation to center the active window
+    /// Only scrolls if the total grid width exceeds screen width
+    pub fn scroll_to_active_window(&mut self) {
+        if self.windows.is_empty() {
+            return;
+        }
+
+        // Calculate total grid width in screen space
+        // Grid layout uses: thumb_w=400, padding=80
+        let thumb_w = 400.0;
+        let padding = 80.0;
+        let cols = self.windows.len();
+        let grid_w = (cols as f64 * (thumb_w + padding) - padding) * self.zoom;
+
+        // Only scroll if grid is wider than screen
+        if grid_w <= self.screen_w as f64 {
+            return;
+        }
+
+        if let Some(idx) = self.active_window {
+            if idx < self.windows.len() {
+                let window = &self.windows[idx];
+                // Calculate target pan_x to center this window on screen
+                // We want: window.x * zoom + pan_x = screen_center
+                // So: pan_x = screen_center - window.x * zoom
+                let screen_center = self.screen_w as f64 / 2.0;
+                self.target_pan_x = screen_center - window.x * self.zoom;
+
+                // Start scroll animation
+                self.scroll_active = true;
+                self.scroll_start_pan = self.pan_x;
+                self.scroll_target = self.target_pan_x;
+                self.scroll_progress = 0.0;
+            }
+        }
+    }
+
+    /// Update scroll animation, returns true if animation is still active
+    pub fn update_scroll_animation(&mut self) -> bool {
+        if !self.scroll_active {
+            return false;
+        }
+
+        // Animation speed: 0.15 per frame (smooth easing)
+        const SCROLL_SPEED: f64 = 0.15;
+        self.scroll_progress += SCROLL_SPEED;
+
+        if self.scroll_progress >= 1.0 {
+            // Animation complete
+            self.pan_x = self.scroll_target;
+            self.scroll_active = false;
+            return false;
+        }
+
+        // Ease-out cubic interpolation
+        let t = self.scroll_progress;
+        let eased = 1.0 - (1.0 - t).powi(3);
+        self.pan_x = self.scroll_start_pan + (self.scroll_target - self.scroll_start_pan) * eased;
+        true
+    }
+
+    /// Check if scroll animation is currently active
+    pub fn is_scrolling(&self) -> bool {
+        self.scroll_active
     }
 
     /// Export current state for saving (only zoom).

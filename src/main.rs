@@ -34,6 +34,7 @@ static mut GDIPLUS_TOKEN: usize = 0;
 
 // Animation constants
 const TIMER_FADE_IN: usize = 1;
+const TIMER_SCROLL_ANIM: usize = 2;
 const ANIM_INTERVAL_MS: u32 = 16;
 const ANIM_STEPS: u32 = 18;
 const TARGET_ALPHA: u8 = 240;
@@ -262,6 +263,18 @@ unsafe extern "system" fn wndproc(
         WM_TIMER => {
             if wparam.0 == TIMER_FADE_IN {
                 with_state(|s| s.tick_animation());
+            } else if wparam.0 == TIMER_SCROLL_ANIM {
+                with_state(|s| {
+                    if s.canvas.update_scroll_animation() {
+                        s.update_all_thumbnails();
+                        let _ = InvalidateRect(hwnd, None, true);
+                    } else {
+                        // Animation complete, kill timer
+                        unsafe {
+                            let _ = KillTimer(hwnd, TIMER_SCROLL_ANIM);
+                        }
+                    }
+                });
             }
             LRESULT(0)
         }
@@ -275,6 +288,9 @@ unsafe extern "system" fn wndproc(
                 // Left or Up arrow - previous window
                 with_state(|s| {
                     s.canvas.prev_window();
+                    unsafe {
+                        let _ = SetTimer(hwnd, TIMER_SCROLL_ANIM, ANIM_INTERVAL_MS, None);
+                    }
                     s.update_all_thumbnails();
                     let _ = InvalidateRect(hwnd, None, true);
                 });
@@ -282,6 +298,9 @@ unsafe extern "system" fn wndproc(
                 // Right or Down arrow - next window
                 with_state(|s| {
                     s.canvas.next_window();
+                    unsafe {
+                        let _ = SetTimer(hwnd, TIMER_SCROLL_ANIM, ANIM_INTERVAL_MS, None);
+                    }
                     s.update_all_thumbnails();
                     let _ = InvalidateRect(hwnd, None, true);
                 });
@@ -309,6 +328,13 @@ unsafe extern "system" fn wndproc(
                 let hit = s.canvas.hit_test(x, y);
                 s.click_target = hit;
                 s.drag_moved = false;
+                // Set active window and scroll to it
+                if let Some(idx) = hit {
+                    s.canvas.set_active_window(idx);
+                    unsafe {
+                        let _ = SetTimer(hwnd, TIMER_SCROLL_ANIM, ANIM_INTERVAL_MS, None);
+                    }
+                }
                 // Window dragging disabled - only canvas panning with right-click
             });
             LRESULT(0)
@@ -393,6 +419,9 @@ unsafe extern "system" fn wndproc(
                         s.canvas.prev_window();
                     } else {
                         s.canvas.next_window();
+                    }
+                    unsafe {
+                        let _ = SetTimer(hwnd, TIMER_SCROLL_ANIM, ANIM_INTERVAL_MS, None);
                     }
                 }
                 s.update_all_thumbnails();
@@ -620,25 +649,6 @@ unsafe extern "system" fn wndproc(
                 DrawTextW(hdc, &mut zw, &mut zr, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
                 SelectObject(hdc, of2);
                 let _ = DeleteObject(bf);
-
-                // Help bar
-                let help = "Ctrl+Alt+Space: Toggle | Scroll: Zoom | Right-drag: Pan | Left-drag: Move | Click: Switch | Esc: Close";
-                let mut hw: Vec<u16> = help.encode_utf16().collect();
-                let sf = CreateFontW(
-                    14, 0, 0, 0, 300, 0, 0, 0, 0, 0, 0, 0, 0,
-                    PCWSTR(font_name.as_ptr()),
-                );
-                let of3 = SelectObject(hdc, sf);
-                SetTextColor(hdc, COLORREF(0x00909090));
-                let mut hr = RECT {
-                    left: 10,
-                    top: s.canvas.screen_h - 30,
-                    right: s.canvas.screen_w - 130,
-                    bottom: s.canvas.screen_h - 10,
-                };
-                DrawTextW(hdc, &mut hw, &mut hr, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
-                SelectObject(hdc, of3);
-                let _ = DeleteObject(sf);
             });
 
             let _ = EndPaint(hwnd, &ps);
@@ -654,6 +664,8 @@ unsafe extern "system" fn wndproc(
                 }
             });
             unsafe {
+                let _ = KillTimer(hwnd, TIMER_FADE_IN);
+                let _ = KillTimer(hwnd, TIMER_SCROLL_ANIM);
                 if GDIPLUS_TOKEN != 0 {
                     let _ = GdiplusShutdown(GDIPLUS_TOKEN);
                     GDIPLUS_TOKEN = 0;

@@ -8,6 +8,32 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_GETICON, WS_EX_TOOLWINDOW, WS_EX_NOACTIVATE, WS_CHILD, HICON,
 };
 
+/// Extract the program name from a window title.
+/// Takes the last 3 words from the title, excluding common separators.
+fn extract_program_name(title: &str) -> String {
+    // Split on common separators and take the last meaningful part
+    let separators = ['-', '–', '—', '|', ':', '·', '[', ']'];
+    let parts: Vec<&str> = title
+        .split(|c: char| separators.contains(&c))
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let last_part = parts.last().unwrap_or(&title);
+
+    // Extract last 3 words from the remaining part
+    let words: Vec<&str> = last_part.split_whitespace().collect();
+    if words.len() >= 3 {
+        format!("{} {} {}", words[words.len() - 3], words[words.len() - 2], words[words.len() - 1])
+    } else if words.len() == 2 {
+        format!("{} {}", words[0], words[1])
+    } else if words.len() == 1 {
+        words[0].to_string()
+    } else {
+        title.to_string()
+    }
+}
+
 /// Information about an enumerated window.
 #[derive(Debug, Clone)]
 pub struct WindowInfo {
@@ -88,6 +114,9 @@ unsafe extern "system" fn enum_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
     if title.trim().is_empty() {
         return TRUE;
     }
+
+    // Extract only the program name (last 2 words) for cleaner display
+    let title = extract_program_name(&title);
 
     // Get window icon (try application icon first, then fall back to class icon)
     let icon = unsafe {
