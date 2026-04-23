@@ -35,9 +35,11 @@ static mut GDIPLUS_TOKEN: usize = 0;
 // Animation constants
 const TIMER_FADE_IN: usize = 1;
 const TIMER_SCROLL_ANIM: usize = 2;
+const TIMER_TEXT_FADE_IN: usize = 3;
 const ANIM_INTERVAL_MS: u32 = 16;
-const ANIM_STEPS: u32 = 18;
-const TARGET_ALPHA: u8 = 240;
+const ANIM_STEPS: u32 = 10;
+const TEXT_ANIM_STEPS: u32 = 10;
+const TARGET_ALPHA: u8 = 255;
 
 fn ease_out(t: f64) -> f64 {
     1.0 - (1.0 - t).powi(3)
@@ -66,6 +68,8 @@ struct AppState {
     bg_bitmap: HBITMAP,
     anim_step: u32,
     anim_active: bool,
+    text_anim_step: u32,
+    text_anim_active: bool,
     current_alpha: u8,
 }
 
@@ -81,6 +85,8 @@ impl AppState {
             bg_bitmap: HBITMAP::default(),
             anim_step: 0,
             anim_active: false,
+            text_anim_step: 0,
+            text_anim_active: false,
             current_alpha: 0,
         }
     }
@@ -195,8 +201,10 @@ impl AppState {
 
         self.visible = false;
         self.anim_active = false;
+        self.text_anim_active = false;
         unsafe {
             let _ = KillTimer(self.canvas_hwnd, TIMER_FADE_IN);
+            let _ = KillTimer(self.canvas_hwnd, TIMER_TEXT_FADE_IN);
         }
 
         for thumb in &self.thumbnails {
@@ -212,6 +220,11 @@ impl AppState {
             self.anim_active = false;
             unsafe {
                 let _ = KillTimer(self.canvas_hwnd, TIMER_FADE_IN);
+                
+                // Start text fade in
+                self.text_anim_active = true;
+                self.text_anim_step = 0;
+                let _ = SetTimer(self.canvas_hwnd, TIMER_TEXT_FADE_IN, ANIM_INTERVAL_MS, None);
             }
         }
 
@@ -221,6 +234,21 @@ impl AppState {
 
         window::set_window_alpha(self.canvas_hwnd, self.current_alpha);
         self.update_all_thumbnails();
+
+        unsafe {
+            let _ = InvalidateRect(self.canvas_hwnd, None, true);
+        }
+    }
+
+    fn tick_text_animation(&mut self) {
+        self.text_anim_step += 1;
+        if self.text_anim_step >= TEXT_ANIM_STEPS {
+            self.text_anim_step = TEXT_ANIM_STEPS;
+            self.text_anim_active = false;
+            unsafe {
+                let _ = KillTimer(self.canvas_hwnd, TIMER_TEXT_FADE_IN);
+            }
+        }
 
         unsafe {
             let _ = InvalidateRect(self.canvas_hwnd, None, true);
@@ -263,6 +291,8 @@ unsafe extern "system" fn wndproc(
         WM_TIMER => {
             if wparam.0 == TIMER_FADE_IN {
                 with_state(|s| s.tick_animation());
+            } else if wparam.0 == TIMER_TEXT_FADE_IN {
+                with_state(|s| s.tick_text_animation());
             } else if wparam.0 == TIMER_SCROLL_ANIM {
                 with_state(|s| {
                     if s.canvas.update_scroll_animation() {
@@ -458,52 +488,18 @@ unsafe extern "system" fn wndproc(
                     );
                     SelectObject(hdc_mem, old);
                     let _ = DeleteDC(hdc_mem);
-
-                    // Apply dark semi-transparent overlay (blur effect) to buffer
-                    unsafe {
-                        let mut graphics: *mut GpGraphics = std::ptr::null_mut();
-                        if GdipCreateFromHDC(hdc_buffer, &mut graphics as *mut _ as *mut _) == Status(0) {
-                            // Draw semi-transparent dark rectangle over entire screen
-                            let mut brush: *mut GpSolidFill = std::ptr::null_mut();
-                            // ARGB: 60% opacity black (0x99000000)
-                            if GdipCreateSolidFill(0x99000000, &mut brush as *mut _ as *mut _) == Status(0) {
-                                let brush_ptr = brush as *mut GpBrush;
-                                let _ = GdipFillRectangleI(
-                                    graphics,
-                                    brush_ptr,
-                                    0, 0,
-                                    s.canvas.screen_w,
-                                    s.canvas.screen_h
-                                );
-                                let _ = GdipDeleteBrush(brush_ptr);
-                            }
-                            let _ = GdipDeleteGraphics(graphics);
-                        }
-                    }
                 }
 
-                // Copy the entire buffer to the screen (background + blur only)
-                let _ = BitBlt(
-                    hdc, 0, 0,
-                    s.canvas.screen_w, s.canvas.screen_h,
-                    hdc_buffer, 0, 0, SRCCOPY,
-                );
-
-                // Clean up buffer
-                SelectObject(hdc_buffer, _old_buffer);
-                let _ = DeleteObject(hbm_buffer);
-                let _ = DeleteDC(hdc_buffer);
-
-                // Now draw borders and text directly to screen (on top of DWM thumbnails)
-                SetBkMode(hdc, TRANSPARENT);
-                SetTextColor(hdc, COLORREF(0x00E0E0E0));
+                // Now draw borders and text to hdc_buffer
+                SetBkMode(hdc_buffer, TRANSPARENT);
+                SetTextColor(hdc_buffer, COLORREF(0x00E0E0E0));
 
                 let font_name = window::wide_string("Segoe UI");
                 let font = CreateFontW(
                     24, 0, 0, 0, 700, 0, 0, 0, 0, 0, 0, 0, 0,
                     PCWSTR(font_name.as_ptr()),
                 );
-                let old_font = SelectObject(hdc, font);
+                let old_font = SelectObject(hdc_buffer, font);
 
                 let scale = if s.anim_active {
                     let t = s.anim_step as f64 / ANIM_STEPS as f64;
@@ -512,6 +508,7 @@ unsafe extern "system" fn wndproc(
                     1.0
                 };
 
+                // Draw borders to hdc_buffer
                 for (idx, cw) in s.canvas.windows.iter().enumerate() {
                     let rect = s.canvas.canvas_to_screen_rect(cw, scale);
                     let is_active = s.canvas.get_active_window() == Some(idx);
@@ -519,15 +516,14 @@ unsafe extern "system" fn wndproc(
                     // Use GDI+ for anti-aliased rounded corners
                     unsafe {
                         let mut graphics: *mut GpGraphics = std::ptr::null_mut();
-                        if GdipCreateFromHDC(hdc, &mut graphics as *mut _ as *mut _) == Status(0) {
+                        if GdipCreateFromHDC(hdc_buffer, &mut graphics as *mut _ as *mut _) == Status(0) {
                             let _ = GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias);
 
                             let mut pen: *mut GpPen = std::ptr::null_mut();
-                            // Active window gets brighter, thicker border
                             let (color, width) = if is_active {
-                                (0xFF00D4FF, 5.0) // Cyan highlight
+                                (0xFF00D4FF, 5.0)
                             } else {
-                                (0x00, 5.0) // Transparent
+                                (0x00, 5.0)
                             };
                             if GdipCreatePen1(color, width, UnitPixel, &mut pen as *mut _ as *mut _) == Status(0) {
                                 let x = rect.left as f32;
@@ -535,29 +531,19 @@ unsafe extern "system" fn wndproc(
                                 let w = (rect.right - rect.left) as f32;
                                 let h = (rect.bottom - rect.top) as f32;
 
-                                // Draw rounded rectangle using path with arc and line commands
                                 let mut path: *mut GpPath = std::ptr::null_mut();
                                 if GdipCreatePath(FillModeAlternate, &mut path as *mut _ as *mut _) == Status(0) {
                                     let r = 16.0f32;
                                     let x2 = x + w;
                                     let y2 = y + h;
 
-                                    // Build rounded rectangle with proper arc calculations
-                                    // Top-right corner
                                     let _ = GdipAddPathArc(path, x2 - 2.0 * r, y, 2.0 * r, 2.0 * r, 270.0, 90.0);
-                                    // Right edge
                                     let _ = GdipAddPathLine(path, x2, y + r, x2, y2 - r);
-                                    // Bottom-right corner
                                     let _ = GdipAddPathArc(path, x2 - 2.0 * r, y2 - 2.0 * r, 2.0 * r, 2.0 * r, 0.0, 90.0);
-                                    // Bottom edge
                                     let _ = GdipAddPathLine(path, x2 - r, y2, x + r, y2);
-                                    // Bottom-left corner
                                     let _ = GdipAddPathArc(path, x, y2 - 2.0 * r, 2.0 * r, 2.0 * r, 90.0, 90.0);
-                                    // Left edge
                                     let _ = GdipAddPathLine(path, x, y2 - r, x, y + r);
-                                    // Top-left corner
                                     let _ = GdipAddPathArc(path, x, y, 2.0 * r, 2.0 * r, 180.0, 90.0);
-                                    // Top edge
                                     let _ = GdipAddPathLine(path, x + r, y, x2 - r, y);
                                     let _ = GdipClosePathFigure(path);
 
@@ -569,86 +555,120 @@ unsafe extern "system" fn wndproc(
                             let _ = GdipDeleteGraphics(graphics);
                         }
                     }
-
-                    let icon_size = 20;
-                    let icon_spacing = 4;
-                    let text_top = rect.bottom + 4;
-
-                    // Measure text width first
-                    let mut tw: Vec<u16> = cw.title.encode_utf16().collect();
-                    let mut measure_rect = RECT {
-                        left: 0,
-                        top: 0,
-                        right: 0,
-                        bottom: 0,
-                    };
-                    let _ = DrawTextW(hdc, &mut tw, &mut measure_rect, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
-                    let text_width = measure_rect.right - measure_rect.left;
-
-                    // Calculate total width and center position
-                    let total_width = if !cw.icon.is_invalid() {
-                        text_width + icon_size + icon_spacing
-                    } else {
-                        text_width
-                    };
-                    let start_x = rect.left + (rect.right - rect.left - total_width) / 2;
-
-                    // Draw icon to the left of text
-                    if !cw.icon.is_invalid() {
-                        let icon_x = start_x;
-                        let icon_y = text_top;
-                        let _ = DrawIconEx(
-                            hdc,
-                            icon_x,
-                            icon_y,
-                            cw.icon,
-                            icon_size,
-                            icon_size,
-                            0,
-                            HBRUSH::default(),
-                            DI_NORMAL,
-                        );
-                    }
-
-                    // Draw text to the right of icon (or centered if no icon)
-                    let text_x = if !cw.icon.is_invalid() {
-                        start_x + icon_size + icon_spacing
-                    } else {
-                        start_x
-                    };
-                    let mut tr = RECT {
-                        left: text_x,
-                        top: text_top,
-                        right: rect.right,
-                        bottom: text_top + 22,
-                    };
-                    DrawTextW(
-                        hdc, &mut tw, &mut tr,
-                        DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
-                    );
                 }
 
-                SelectObject(hdc, old_font);
-                let _ = DeleteObject(font);
+                // Draw text and icons
+                let mut text_dc = hdc_buffer;
+                let mut hdc_text = HDC::default();
+                let mut hbm_text = HBITMAP::default();
+                let mut old_text = HGDIOBJ::default();
+                let mut text_old_font = HGDIOBJ::default();
+
+                if !s.anim_active {
+                    if s.text_anim_active {
+                        hdc_text = CreateCompatibleDC(hdc_buffer);
+                        hbm_text = CreateCompatibleBitmap(hdc_buffer, s.canvas.screen_w, s.canvas.screen_h);
+                        old_text = SelectObject(hdc_text, hbm_text);
+                        let _ = BitBlt(hdc_text, 0, 0, s.canvas.screen_w, s.canvas.screen_h, hdc_buffer, 0, 0, SRCCOPY);
+                        text_dc = hdc_text;
+                        SetBkMode(text_dc, TRANSPARENT);
+                        SetTextColor(text_dc, COLORREF(0x00E0E0E0));
+                        text_old_font = SelectObject(text_dc, font);
+                    }
+
+                    for (idx, cw) in s.canvas.windows.iter().enumerate() {
+                        let rect = s.canvas.canvas_to_screen_rect(cw, scale);
+                        let icon_size = 20;
+                        let icon_spacing = 4;
+                        let text_top = rect.bottom + 4;
+
+                        let mut tw: Vec<u16> = cw.title.encode_utf16().collect();
+                        let mut measure_rect = RECT {
+                            left: 0, top: 0, right: 0, bottom: 0,
+                        };
+                        let _ = DrawTextW(text_dc, &mut tw, &mut measure_rect, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+                        let text_width = measure_rect.right - measure_rect.left;
+
+                        let total_width = if !cw.icon.is_invalid() {
+                            text_width + icon_size + icon_spacing
+                        } else {
+                            text_width
+                        };
+                        let start_x = rect.left + (rect.right - rect.left - total_width) / 2;
+
+                        if !cw.icon.is_invalid() {
+                            let _ = DrawIconEx(
+                                text_dc,
+                                start_x, text_top,
+                                cw.icon,
+                                icon_size, icon_size,
+                                0, HBRUSH::default(), DI_NORMAL,
+                            );
+                        }
+
+                        let text_x = if !cw.icon.is_invalid() {
+                            start_x + icon_size + icon_spacing
+                        } else {
+                            start_x
+                        };
+                        let mut tr = RECT {
+                            left: text_x, top: text_top, right: rect.right, bottom: text_top + 22,
+                        };
+                        DrawTextW(text_dc, &mut tw, &mut tr, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+                    }
+
+                    if s.text_anim_active {
+                        SelectObject(text_dc, text_old_font);
+                        let text_t = s.text_anim_step as f64 / TEXT_ANIM_STEPS as f64;
+                        let text_alpha = (255.0 * ease_out(text_t)) as u8;
+                        let bf = BLENDFUNCTION {
+                            BlendOp: AC_SRC_OVER as u8,
+                            BlendFlags: 0,
+                            SourceConstantAlpha: text_alpha,
+                            AlphaFormat: 0,
+                        };
+                        let _ = AlphaBlend(
+                            hdc_buffer, 0, 0, s.canvas.screen_w, s.canvas.screen_h,
+                            hdc_text, 0, 0, s.canvas.screen_w, s.canvas.screen_h,
+                            bf
+                        );
+                        SelectObject(hdc_text, old_text);
+                        let _ = DeleteObject(hbm_text);
+                        let _ = DeleteDC(hdc_text);
+                    }
+                }
 
                 // Zoom indicator
                 let zoom_text = format!("{:.0}%", s.canvas.zoom * 100.0);
                 let mut zw: Vec<u16> = zoom_text.encode_utf16().collect();
-                let bf = CreateFontW(
+                let bf_font = CreateFontW(
                     24, 0, 0, 0, 300, 0, 0, 0, 0, 0, 0, 0, 0,
                     PCWSTR(font_name.as_ptr()),
                 );
-                let of2 = SelectObject(hdc, bf);
-                SetTextColor(hdc, COLORREF(0x00808080));
+                let of2 = SelectObject(hdc_buffer, bf_font);
+                SetTextColor(hdc_buffer, COLORREF(0x00808080));
                 let mut zr = RECT {
-                    left: s.canvas.screen_w - 120,
-                    top: s.canvas.screen_h - 40,
-                    right: s.canvas.screen_w - 10,
-                    bottom: s.canvas.screen_h - 10,
+                    left: s.canvas.screen_w - 120, top: s.canvas.screen_h - 40,
+                    right: s.canvas.screen_w - 10, bottom: s.canvas.screen_h - 10,
                 };
-                DrawTextW(hdc, &mut zw, &mut zr, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
-                SelectObject(hdc, of2);
-                let _ = DeleteObject(bf);
+                DrawTextW(hdc_buffer, &mut zw, &mut zr, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
+                SelectObject(hdc_buffer, of2);
+                let _ = DeleteObject(bf_font);
+
+                SelectObject(hdc_buffer, old_font);
+                let _ = DeleteObject(font);
+
+                // Finally, copy the fully composed buffer to the screen ONCE
+                let _ = BitBlt(
+                    hdc, 0, 0,
+                    s.canvas.screen_w, s.canvas.screen_h,
+                    hdc_buffer, 0, 0, SRCCOPY,
+                );
+
+                // Clean up buffer
+                SelectObject(hdc_buffer, _old_buffer);
+                let _ = DeleteObject(hbm_buffer);
+                let _ = DeleteDC(hdc_buffer);
             });
 
             let _ = EndPaint(hwnd, &ps);
