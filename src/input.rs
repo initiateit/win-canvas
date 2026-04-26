@@ -1,16 +1,5 @@
 //! Input handling — mouse and keyboard events for the canvas.
 
-/// Decoded mouse input event.
-#[derive(Debug)]
-pub enum MouseEvent {
-    LeftDown { x: f64, y: f64 },
-    LeftUp { x: f64, y: f64 },
-    RightDown { x: f64, y: f64 },
-    RightUp { x: f64, y: f64 },
-    Move { x: f64, y: f64 },
-    Wheel { x: f64, y: f64, delta: f64 },
-}
-
 /// Extract mouse coordinates from LPARAM.
 pub fn mouse_coords(lparam: isize) -> (f64, f64) {
     let x = (lparam & 0xFFFF) as i16 as f64;

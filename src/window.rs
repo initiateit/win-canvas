@@ -128,7 +128,7 @@ pub fn capture_screen(screen_w: i32, screen_h: i32) -> HBITMAP {
                 biHeight: -screen_h, // top-down
                 biPlanes: 1,
                 biBitCount: 32,
-                biCompression: BI_RGB.0 as u32,
+                biCompression: BI_RGB.0,
                 ..Default::default()
             },
             ..Default::default()
@@ -197,7 +197,7 @@ pub fn capture_screen(screen_w: i32, screen_h: i32) -> HBITMAP {
             size,
             Some(pixels.as_ptr() as *const c_void),
             (screen_w * 4) as u32,
-            &props as *const _ as *const D2D1_BITMAP_PROPERTIES1,
+            &props as *const _,
         ).unwrap();
 
         // 5. Create render target texture (D3D11)
@@ -219,7 +219,7 @@ pub fn capture_screen(screen_w: i32, screen_h: i32) -> HBITMAP {
         
         let dxgi_surface: IDXGISurface = rt_tex.cast().unwrap();
         
-        let mut target_props = D2D1_BITMAP_PROPERTIES1 {
+        let target_props = D2D1_BITMAP_PROPERTIES1 {
             pixelFormat: D2D1_PIXEL_FORMAT {
                 format: DXGI_FORMAT_B8G8R8A8_UNORM,
                 alphaMode: D2D1_ALPHA_MODE_IGNORE,

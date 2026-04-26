@@ -3,8 +3,8 @@
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Dwm::{
     DwmQueryThumbnailSourceSize, DwmRegisterThumbnail, DwmUnregisterThumbnail,
-    DwmUpdateThumbnailProperties, DWM_THUMBNAIL_PROPERTIES, DWM_TNP_VISIBLE, DWM_TNP_RECTDESTINATION,
-    DWM_TNP_SOURCECLIENTAREAONLY, DWM_TNP_OPACITY,
+    DwmUpdateThumbnailProperties, DWM_THUMBNAIL_PROPERTIES, DWM_TNP_OPACITY,
+    DWM_TNP_RECTDESTINATION, DWM_TNP_SOURCECLIENTAREAONLY, DWM_TNP_VISIBLE,
 };
 
 /// A managed DWM thumbnail.
@@ -33,13 +33,20 @@ impl Thumbnail {
 
     /// Update the thumbnail display properties (position/size on the destination window).
     /// The rect is inset to create negative space for rounded corners.
-    pub fn update(&self, dest_rect: RECT, opacity: u8, client_area_only: bool) -> windows::core::Result<()> {
+    pub fn update(
+        &self,
+        dest_rect: RECT,
+        opacity: u8,
+        client_area_only: bool,
+    ) -> windows::core::Result<()> {
         unsafe {
-            let mut props = DWM_THUMBNAIL_PROPERTIES::default();
-            props.dwFlags = DWM_TNP_VISIBLE | DWM_TNP_RECTDESTINATION | DWM_TNP_OPACITY;
-            props.fVisible = true.into();
-            props.rcDestination = dest_rect;
-            props.opacity = opacity;
+            let mut props = DWM_THUMBNAIL_PROPERTIES {
+                dwFlags: DWM_TNP_VISIBLE | DWM_TNP_RECTDESTINATION | DWM_TNP_OPACITY,
+                fVisible: true.into(),
+                rcDestination: dest_rect,
+                opacity,
+                ..Default::default()
+            };
 
             if client_area_only {
                 props.dwFlags |= DWM_TNP_SOURCECLIENTAREAONLY;
@@ -54,20 +61,13 @@ impl Thumbnail {
     /// Hide this thumbnail (set invisible).
     pub fn hide(&self) -> windows::core::Result<()> {
         unsafe {
-            let mut props = DWM_THUMBNAIL_PROPERTIES::default();
-            props.dwFlags = DWM_TNP_VISIBLE;
-            props.fVisible = false.into();
+            let props = DWM_THUMBNAIL_PROPERTIES {
+                dwFlags: DWM_TNP_VISIBLE,
+                fVisible: false.into(),
+                ..Default::default()
+            };
             DwmUpdateThumbnailProperties(self.handle, &props)?;
             Ok(())
-        }
-    }
-
-    /// Get the aspect ratio (width / height).
-    pub fn aspect_ratio(&self) -> f64 {
-        if self.source_height == 0 {
-            1.0
-        } else {
-            self.source_width as f64 / self.source_height as f64
         }
     }
 }

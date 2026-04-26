@@ -245,11 +245,6 @@ impl Canvas {
         true
     }
 
-    /// Check if scroll animation is currently active
-    pub fn is_scrolling(&self) -> bool {
-        self.scroll_active
-    }
-
     /// Export current state for saving (only zoom).
     pub fn to_saved_state(&self) -> SavedCanvasState {
         SavedCanvasState {
@@ -298,15 +293,6 @@ impl Canvas {
             }
         }
         None
-    }
-
-    pub fn start_drag(&mut self, index: usize, screen_x: f64, screen_y: f64) {
-        self.drag_target = Some(index);
-        self.drag_start_x = screen_x;
-        self.drag_start_y = screen_y;
-        self.drag_origin_x = self.windows[index].x;
-        self.drag_origin_y = self.windows[index].y;
-        self.windows[index].dragging = true;
     }
 
     pub fn update_drag(&mut self, screen_x: f64, screen_y: f64) {

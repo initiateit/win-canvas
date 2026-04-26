@@ -16,6 +16,7 @@ mod window;
 use std::cell::RefCell;
 use std::fs;
 use std::io::Write;
+use std::ptr::{addr_of, addr_of_mut};
 
 use std::result::Result::Ok;
 
@@ -258,7 +259,7 @@ impl AppState {
 }
 
 thread_local! {
-    static APP_STATE: RefCell<Option<AppState>> = RefCell::new(None);
+    static APP_STATE: RefCell<Option<AppState>> = const { RefCell::new(None) };
 }
 
 fn with_state<F, R>(f: F) -> Option<R>
@@ -267,7 +268,7 @@ where
 {
     APP_STATE.with(|cell| {
         if let Ok(mut opt) = cell.try_borrow_mut() {
-            opt.as_mut().map(|state| f(state))
+            opt.as_mut().map(f)
         } else {
             // State is currently borrowed (re-entrant call), skip
             None
@@ -514,11 +515,7 @@ unsafe extern "system" fn wndproc(
                             let _ = GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias);
 
                             let mut pen: *mut GpPen = std::ptr::null_mut();
-                            let (color, width) = if is_active {
-                                (0x00, 5.0) // Transparent to hide the blue border
-                            } else {
-                                (0x00, 5.0)
-                            };
+                            let (color, width) = (0x00, 5.0); // Transparent to hide the blue border
                             if GdipCreatePen1(color, width, UnitPixel, &mut pen as *mut _ as *mut _) == Status(0) {
                                 let x = rect.left as f32;
                                 let y = rect.top as f32;
@@ -561,7 +558,8 @@ unsafe extern "system" fn wndproc(
                                     }
 
                                     // 9-slice drop shadow using pre-rendered PNG (anchored to the DWM Thumbnail)
-                                    if is_active && !SHADOW_IMAGE.is_null() {
+                                    if is_active && !(*addr_of!(SHADOW_IMAGE)).is_null() {
+                                        let shadow = *addr_of!(SHADOW_IMAGE);
                                         let mt = 50.0f32;
                                         let ml = 50.0f32;
                                         let mr = 150.0f32;
@@ -590,7 +588,7 @@ unsafe extern "system" fn wndproc(
                                         let attr: *mut GpImageAttributes = std::ptr::null_mut();
                                         
                                         let draw_slice = |dx: f32, dy: f32, dw: f32, dh: f32, sx: f32, sy: f32, sw: f32, sh: f32| {
-                                            let _ = GdipDrawImageRectRect(graphics, SHADOW_IMAGE, dx, dy, dw, dh, sx, sy, sw, sh, UnitPixel, attr, 0isize as _, std::ptr::null_mut());
+                                            let _ = GdipDrawImageRectRect(graphics, shadow, dx, dy, dw, dh, sx, sy, sw, sh, UnitPixel, attr, 0isize as _, std::ptr::null_mut());
                                         };
 
                                         // Top row
@@ -661,7 +659,7 @@ unsafe extern "system" fn wndproc(
                             let _ = GdipSetStringFormatAlign(format, StringAlignmentNear);
                             let _ = GdipSetStringFormatLineAlign(format, StringAlignmentCenter);
 
-                            for (idx, cw) in s.canvas.windows.iter().enumerate() {
+                            for cw in s.canvas.windows.iter() {
                                 let rect = s.canvas.canvas_to_screen_rect(cw, scale);
                                 let icon_size = 20;
                                 let icon_spacing = 6;
@@ -832,13 +830,13 @@ unsafe extern "system" fn wndproc(
             unsafe {
                 let _ = KillTimer(hwnd, TIMER_FADE_IN);
                 let _ = KillTimer(hwnd, TIMER_SCROLL_ANIM);
-                if !SHADOW_IMAGE.is_null() {
-                    let _ = GdipDisposeImage(SHADOW_IMAGE);
-                    SHADOW_IMAGE = std::ptr::null_mut();
+                if !(*addr_of!(SHADOW_IMAGE)).is_null() {
+                    let _ = GdipDisposeImage(*addr_of!(SHADOW_IMAGE));
+                    *addr_of_mut!(SHADOW_IMAGE) = std::ptr::null_mut();
                 }
-                if GDIPLUS_TOKEN != 0 {
-                    let _ = GdiplusShutdown(GDIPLUS_TOKEN);
-                    GDIPLUS_TOKEN = 0;
+                if *addr_of!(GDIPLUS_TOKEN) != 0 {
+                    GdiplusShutdown(*addr_of!(GDIPLUS_TOKEN));
+                    *addr_of_mut!(GDIPLUS_TOKEN) = 0;
                 }
             }
             PostQuitMessage(0);
@@ -868,7 +866,7 @@ fn main() {
         let mut token = 0usize;
         let result = GdiplusStartup(&mut token, &input, std::ptr::null_mut());
         if result == Status(0) {
-            GDIPLUS_TOKEN = token;
+            *addr_of_mut!(GDIPLUS_TOKEN) = token;
             log_debug("GDI+ initialized successfully");
 
             // Pre-warm the GDI+ font cache to eliminate the 4-second delay on first overlay load
@@ -882,7 +880,7 @@ fn main() {
 
             // Load the 9-slice shadow image
             let shadow_path = window::wide_string("src\\assets\\drop_shadow.png");
-            if GdipLoadImageFromFile(PCWSTR(shadow_path.as_ptr()), &mut SHADOW_IMAGE) == Status(0) {
+            if GdipLoadImageFromFile(PCWSTR(shadow_path.as_ptr()), addr_of_mut!(SHADOW_IMAGE)) == Status(0) {
                 log_debug("Loaded drop_shadow.png successfully");
             } else {
                 log_debug("Failed to load drop_shadow.png");
