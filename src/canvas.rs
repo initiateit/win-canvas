@@ -95,7 +95,7 @@ impl Canvas {
         let cols = count;
         let _rows = 1;
         let thumb_w = 400.0;
-        let padding = 80.0;
+        let padding = 120.0; // Increased padding for backing cards
         let grid_w = cols as f64 * (thumb_w + padding) - padding;
         let start_x = -(grid_w / 2.0);
         let start_y = 0.0; // Centered vertically

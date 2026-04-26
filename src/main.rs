@@ -31,6 +31,7 @@ use dwm::Thumbnail;
 
 // GDI+ token
 static mut GDIPLUS_TOKEN: usize = 0;
+static mut SHADOW_IMAGE: *mut GpImage = std::ptr::null_mut();
 
 // Animation constants
 const TIMER_FADE_IN: usize = 1;
@@ -494,13 +495,6 @@ unsafe extern "system" fn wndproc(
                 SetBkMode(hdc_buffer, TRANSPARENT);
                 SetTextColor(hdc_buffer, COLORREF(0x00E0E0E0));
 
-                let font_name = window::wide_string("Segoe UI");
-                let font = CreateFontW(
-                    24, 0, 0, 0, 700, 0, 0, 0, 0, 0, 0, 0, 0,
-                    PCWSTR(font_name.as_ptr()),
-                );
-                let old_font = SelectObject(hdc_buffer, font);
-
                 let scale = if s.anim_active {
                     let t = s.anim_step as f64 / ANIM_STEPS as f64;
                     0.92 + 0.08 * ease_out(t)
@@ -521,7 +515,7 @@ unsafe extern "system" fn wndproc(
 
                             let mut pen: *mut GpPen = std::ptr::null_mut();
                             let (color, width) = if is_active {
-                                (0xFF00D4FF, 5.0)
+                                (0x00, 5.0) // Transparent to hide the blue border
                             } else {
                                 (0x00, 5.0)
                             };
@@ -533,21 +527,89 @@ unsafe extern "system" fn wndproc(
 
                                 let mut path: *mut GpPath = std::ptr::null_mut();
                                 if GdipCreatePath(FillModeAlternate, &mut path as *mut _ as *mut _) == Status(0) {
-                                    let r = 16.0f32;
-                                    let x2 = x + w;
-                                    let y2 = y + h;
+                                    
+                                    // Card Geometry
+                                    let card_pad_sides = 32.0f32; // 32px padding sides/top
+                                    let card_pad_bottom = 90.0f32; // 80px padding bottom for the label
+                                    let cx = x - card_pad_sides;
+                                    let cy = y - card_pad_sides;
+                                    let cw = w + card_pad_sides * 2.0;
+                                    let ch = h + card_pad_sides + card_pad_bottom;
+                                    let r = 12.0f32; // 12px border radius
+                                    let d = r * 2.0;
 
-                                    let _ = GdipAddPathArc(path, x2 - 2.0 * r, y, 2.0 * r, 2.0 * r, 270.0, 90.0);
-                                    let _ = GdipAddPathLine(path, x2, y + r, x2, y2 - r);
-                                    let _ = GdipAddPathArc(path, x2 - 2.0 * r, y2 - 2.0 * r, 2.0 * r, 2.0 * r, 0.0, 90.0);
-                                    let _ = GdipAddPathLine(path, x2 - r, y2, x + r, y2);
-                                    let _ = GdipAddPathArc(path, x, y2 - 2.0 * r, 2.0 * r, 2.0 * r, 90.0, 90.0);
-                                    let _ = GdipAddPathLine(path, x, y2 - r, x, y + r);
-                                    let _ = GdipAddPathArc(path, x, y, 2.0 * r, 2.0 * r, 180.0, 90.0);
-                                    let _ = GdipAddPathLine(path, x + r, y, x2 - r, y);
+                                    let _ = GdipAddPathArc(path, cx, cy, d, d, 180.0, 90.0);
+                                    let _ = GdipAddPathArc(path, cx + cw - d, cy, d, d, 270.0, 90.0);
+                                    let _ = GdipAddPathArc(path, cx + cw - d, cy + ch - d, d, d, 0.0, 90.0);
+                                    let _ = GdipAddPathArc(path, cx, cy + ch - d, d, d, 90.0, 90.0);
                                     let _ = GdipClosePathFigure(path);
 
-                                    let _ = GdipDrawPath(graphics, pen, path);
+                                    // Draw the White Backing Card (No Shadow!)
+                                    if is_active {
+                                        let mut card_fill: *mut GpSolidFill = std::ptr::null_mut();
+                                        let opacity = 0x4D; // ~29% opacity white
+                                        if GdipCreateSolidFill((opacity << 24) | 0xFFFFFF, &mut card_fill as *mut _ as *mut _) == Status(0) {
+                                            let _ = GdipFillPath(graphics, card_fill as *mut _ as *mut GpBrush, path);
+                                            let _ = GdipDeleteBrush(card_fill as *mut _ as *mut GpBrush);
+                                        }
+
+                                        let mut card_pen: *mut GpPen = std::ptr::null_mut();
+                                        if GdipCreatePen1((0xBF << 24) | 0xFFFFFF, 4.0, UnitPixel, &mut card_pen as *mut _ as *mut _) == Status(0) {
+                                            let _ = GdipDrawPath(graphics, card_pen, path);
+                                            let _ = GdipDeletePen(card_pen);
+                                        }
+                                    }
+
+                                    // 9-slice drop shadow using pre-rendered PNG (anchored to the DWM Thumbnail)
+                                    if is_active && !SHADOW_IMAGE.is_null() {
+                                        let mt = 50.0f32;
+                                        let ml = 50.0f32;
+                                        let mr = 150.0f32;
+                                        let mb = 150.0f32;
+                                        
+                                        // Scale factor to make the shadow visually larger
+                                        let scale = 1.6f32; // Reverted back to a softer scale for the DWM window
+                                        let d_mt = mt * scale;
+                                        let d_ml = ml * scale;
+                                        let d_mr = mr * scale;
+                                        let d_mb = mb * scale;
+                                        
+                                        // Source dimensions
+                                        let src_cx = 100.0f32;
+                                        let src_cy = 100.0f32;
+                                        
+                                        // Destination dimensions mapped to the DWM THUMBNAIL bounds
+                                        let dx0 = x - d_ml;
+                                        let dx1 = x;
+                                        let dx2 = x + w;
+                                        
+                                        let dy0 = y - d_mt;
+                                        let dy1 = y;
+                                        let dy2 = y + h;
+                                        
+                                        let attr: *mut GpImageAttributes = std::ptr::null_mut();
+                                        
+                                        let draw_slice = |dx: f32, dy: f32, dw: f32, dh: f32, sx: f32, sy: f32, sw: f32, sh: f32| {
+                                            let _ = GdipDrawImageRectRect(graphics, SHADOW_IMAGE, dx, dy, dw, dh, sx, sy, sw, sh, UnitPixel, attr, 0isize as _, std::ptr::null_mut());
+                                        };
+
+                                        // Top row
+                                        draw_slice(dx0, dy0, d_ml, d_mt, 0.0, 0.0, ml, mt); // Top-left
+                                        draw_slice(dx1, dy0, w, d_mt, ml, 0.0, src_cx, mt); // Top-center
+                                        draw_slice(dx2, dy0, d_mr, d_mt, ml + src_cx, 0.0, mr, mt); // Top-right
+
+                                        // Middle row
+                                        draw_slice(dx0, dy1, d_ml, h, 0.0, mt, ml, src_cy); // Mid-left
+                                        draw_slice(dx1, dy1, w, h, ml, mt, src_cx, src_cy); // Center
+                                        draw_slice(dx2, dy1, d_mr, h, ml + src_cx, mt, mr, src_cy); // Mid-right
+
+                                        // Bottom row
+                                        draw_slice(dx0, dy2, d_ml, d_mb, 0.0, mt + src_cy, ml, mb); // Bottom-left
+                                        draw_slice(dx1, dy2, w, d_mb, ml, mt + src_cy, src_cx, mb); // Bottom-center
+                                        draw_slice(dx2, dy2, d_mr, d_mb, ml + src_cx, mt + src_cy, mr, mb); // Bottom-right
+                                    }
+
+
                                     let _ = GdipDeletePath(path);
                                 }
                                 let _ = GdipDeletePen(pen);
@@ -562,7 +624,6 @@ unsafe extern "system" fn wndproc(
                 let mut hdc_text = HDC::default();
                 let mut hbm_text = HBITMAP::default();
                 let mut old_text = HGDIOBJ::default();
-                let mut text_old_font = HGDIOBJ::default();
 
                 if !s.anim_active {
                     if s.text_anim_active {
@@ -573,52 +634,139 @@ unsafe extern "system" fn wndproc(
                         text_dc = hdc_text;
                         SetBkMode(text_dc, TRANSPARENT);
                         SetTextColor(text_dc, COLORREF(0x00E0E0E0));
-                        text_old_font = SelectObject(text_dc, font);
                     }
 
-                    for (idx, cw) in s.canvas.windows.iter().enumerate() {
-                        let rect = s.canvas.canvas_to_screen_rect(cw, scale);
-                        let icon_size = 20;
-                        let icon_spacing = 4;
-                        let text_top = rect.bottom + 4;
+                    unsafe {
+                        let mut graphics: *mut GpGraphics = std::ptr::null_mut();
+                        if GdipCreateFromHDC(text_dc, &mut graphics as *mut _ as *mut _) == Status(0) {
+                            let _ = GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias);
+                            let _ = GdipSetTextRenderingHint(graphics, TextRenderingHintAntiAliasGridFit);
+                            let _ = GdipSetInterpolationMode(graphics, InterpolationModeHighQualityBicubic);
 
-                        let mut tw: Vec<u16> = cw.title.encode_utf16().collect();
-                        let mut measure_rect = RECT {
-                            left: 0, top: 0, right: 0, bottom: 0,
-                        };
-                        let _ = DrawTextW(text_dc, &mut tw, &mut measure_rect, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
-                        let text_width = measure_rect.right - measure_rect.left;
+                            // Using standard "Segoe UI" family prevents fallback to MS Sans Serif
+                            let font_name = window::wide_string("Segoe UI");
+                            let mut font_family: *mut GpFontFamily = std::ptr::null_mut();
+                            let _ = GdipCreateFontFamilyFromName(PCWSTR(font_name.as_ptr()), std::ptr::null_mut(), &mut font_family);
+                            
+                            let mut font: *mut GpFont = std::ptr::null_mut();
+                            // 1 = Bold, UnitPixel
+                            let _ = GdipCreateFont(font_family, 15.0, 1, UnitPixel, &mut font);
+                            
+                            let mut brush: *mut GpSolidFill = std::ptr::null_mut();
+                            let _ = GdipCreateSolidFill(0xE6242430, &mut brush as *mut _ as *mut _);
+                            
+                            let mut format: *mut GpStringFormat = std::ptr::null_mut();
+                            let _ = GdipCreateStringFormat(0, 0, &mut format);
+                            let _ = GdipSetStringFormatTrimming(format, StringTrimmingEllipsisCharacter);
+                            let _ = GdipSetStringFormatAlign(format, StringAlignmentNear);
+                            let _ = GdipSetStringFormatLineAlign(format, StringAlignmentCenter);
 
-                        let total_width = if !cw.icon.is_invalid() {
-                            text_width + icon_size + icon_spacing
-                        } else {
-                            text_width
-                        };
-                        let start_x = rect.left + (rect.right - rect.left - total_width) / 2;
+                            for (idx, cw) in s.canvas.windows.iter().enumerate() {
+                                let rect = s.canvas.canvas_to_screen_rect(cw, scale);
+                                let icon_size = 20;
+                                let icon_spacing = 6;
 
-                        if !cw.icon.is_invalid() {
-                            let _ = DrawIconEx(
-                                text_dc,
-                                start_x, text_top,
-                                cw.icon,
-                                icon_size, icon_size,
-                                0, HBRUSH::default(), DI_NORMAL,
-                            );
+                                let tw: Vec<u16> = cw.title.encode_utf16().chain(std::iter::once(0)).collect();
+                                
+                                let mut bounding_box = RectF::default();
+                                let _ = GdipMeasureString(
+                                    graphics,
+                                    PCWSTR(tw.as_ptr()),
+                                    (tw.len() - 1) as i32,
+                                    font,
+                                    &RectF { X: 0.0, Y: 0.0, Width: 10000.0, Height: 10000.0 },
+                                    format,
+                                    &mut bounding_box,
+                                    std::ptr::null_mut(),
+                                    std::ptr::null_mut(),
+                                );
+                                
+                                let text_width = bounding_box.Width as i32;
+                                
+                                let total_width = if !cw.icon.is_invalid() {
+                                    text_width + icon_size + icon_spacing
+                                } else {
+                                    text_width
+                                };
+                                let start_x = rect.left + (rect.right - rect.left - total_width) / 2;
+
+                                // Draw pill background
+                                let pad_x = 14;
+                                let pill_h = 32;
+                                let pill_w = total_width + pad_x * 2;
+                                let pill_x = start_x - pad_x;
+                                let pill_y = rect.bottom + 30; // Distance below thumbnail
+
+                                let mut pill_path: *mut GpPath = std::ptr::null_mut();
+                                if GdipCreatePath(FillModeAlternate, &mut pill_path as *mut _ as *mut _) == Status(0) {
+                                    let r = 12.0f32; // border radius
+                                    let x = pill_x as f32;
+                                    let y = pill_y as f32;
+                                    let w = pill_w as f32;
+                                    let h = pill_h as f32;
+                                    let x2 = x + w;
+                                    let y2 = y + h;
+
+                                    let _ = GdipAddPathArc(pill_path, x2 - 2.0 * r, y, 2.0 * r, 2.0 * r, 270.0, 90.0);
+                                    let _ = GdipAddPathLine(pill_path, x2, y + r, x2, y2 - r);
+                                    let _ = GdipAddPathArc(pill_path, x2 - 2.0 * r, y2 - 2.0 * r, 2.0 * r, 2.0 * r, 0.0, 90.0);
+                                    let _ = GdipAddPathLine(pill_path, x2 - r, y2, x + r, y2);
+                                    let _ = GdipAddPathArc(pill_path, x, y2 - 2.0 * r, 2.0 * r, 2.0 * r, 90.0, 90.0);
+                                    let _ = GdipAddPathLine(pill_path, x, y2 - r, x, y + r);
+                                    let _ = GdipAddPathArc(pill_path, x, y, 2.0 * r, 2.0 * r, 180.0, 90.0);
+                                    let _ = GdipAddPathLine(pill_path, x + r, y, x2 - r, y);
+                                    let _ = GdipClosePathFigure(pill_path);
+
+                                    let mut pill_brush: *mut GpSolidFill = std::ptr::null_mut();
+                                    if GdipCreateSolidFill(0xFFE5E7EB, &mut pill_brush as *mut _ as *mut _) == Status(0) {
+                                        let _ = GdipFillPath(graphics, pill_brush as *mut _ as *mut GpBrush, pill_path);
+                                        let _ = GdipDeleteBrush(pill_brush as *mut _ as *mut GpBrush);
+                                    }
+                                    let _ = GdipDeletePath(pill_path);
+                                }
+
+                                if !cw.icon.is_invalid() {
+                                    let mut gp_icon: *mut GpBitmap = std::ptr::null_mut();
+                                    if GdipCreateBitmapFromHICON(cw.icon, &mut gp_icon) == Status(0) {
+                                        let icon_y = pill_y + (pill_h - icon_size) / 2;
+                                        let _ = GdipDrawImageRectI(graphics, gp_icon as *mut _ as *mut GpImage, start_x, icon_y, icon_size, icon_size);
+                                        let _ = GdipDisposeImage(gp_icon as *mut _ as *mut GpImage);
+                                    }
+                                }
+
+                                let text_x = if !cw.icon.is_invalid() {
+                                    start_x + icon_size + icon_spacing
+                                } else {
+                                    start_x
+                                };
+                                
+                                let rectf = RectF {
+                                    X: text_x as f32,
+                                    Y: pill_y as f32 + 2.0, // 2px offset for optical centering
+                                    Width: (rect.right - text_x).max(1) as f32,
+                                    Height: pill_h as f32,
+                                };
+                                
+                                let _ = GdipDrawString(
+                                    graphics,
+                                    PCWSTR(tw.as_ptr()),
+                                    (tw.len() - 1) as i32,
+                                    font,
+                                    &rectf,
+                                    format,
+                                    brush as *mut _ as *mut GpBrush,
+                                );
+                            }
+                            
+                            let _ = GdipDeleteStringFormat(format);
+                            let _ = GdipDeleteBrush(brush as *mut _ as *mut GpBrush);
+                            let _ = GdipDeleteFont(font);
+                            let _ = GdipDeleteFontFamily(font_family);
+                            let _ = GdipDeleteGraphics(graphics);
                         }
-
-                        let text_x = if !cw.icon.is_invalid() {
-                            start_x + icon_size + icon_spacing
-                        } else {
-                            start_x
-                        };
-                        let mut tr = RECT {
-                            left: text_x, top: text_top, right: rect.right, bottom: text_top + 22,
-                        };
-                        DrawTextW(text_dc, &mut tw, &mut tr, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
                     }
 
                     if s.text_anim_active {
-                        SelectObject(text_dc, text_old_font);
                         let text_t = s.text_anim_step as f64 / TEXT_ANIM_STEPS as f64;
                         let text_alpha = (255.0 * ease_out(text_t)) as u8;
                         let bf = BLENDFUNCTION {
@@ -641,6 +789,7 @@ unsafe extern "system" fn wndproc(
                 // Zoom indicator
                 let zoom_text = format!("{:.0}%", s.canvas.zoom * 100.0);
                 let mut zw: Vec<u16> = zoom_text.encode_utf16().collect();
+                let font_name = window::wide_string("Segoe UI");
                 let bf_font = CreateFontW(
                     24, 0, 0, 0, 300, 0, 0, 0, 0, 0, 0, 0, 0,
                     PCWSTR(font_name.as_ptr()),
@@ -654,9 +803,6 @@ unsafe extern "system" fn wndproc(
                 DrawTextW(hdc_buffer, &mut zw, &mut zr, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
                 SelectObject(hdc_buffer, of2);
                 let _ = DeleteObject(bf_font);
-
-                SelectObject(hdc_buffer, old_font);
-                let _ = DeleteObject(font);
 
                 // Finally, copy the fully composed buffer to the screen ONCE
                 let _ = BitBlt(
@@ -686,6 +832,10 @@ unsafe extern "system" fn wndproc(
             unsafe {
                 let _ = KillTimer(hwnd, TIMER_FADE_IN);
                 let _ = KillTimer(hwnd, TIMER_SCROLL_ANIM);
+                if !SHADOW_IMAGE.is_null() {
+                    let _ = GdipDisposeImage(SHADOW_IMAGE);
+                    SHADOW_IMAGE = std::ptr::null_mut();
+                }
                 if GDIPLUS_TOKEN != 0 {
                     let _ = GdiplusShutdown(GDIPLUS_TOKEN);
                     GDIPLUS_TOKEN = 0;
@@ -720,6 +870,23 @@ fn main() {
         if result == Status(0) {
             GDIPLUS_TOKEN = token;
             log_debug("GDI+ initialized successfully");
+
+            // Pre-warm the GDI+ font cache to eliminate the 4-second delay on first overlay load
+            log_debug("Pre-warming GDI+ font cache...");
+            let font_name = window::wide_string("Segoe UI");
+            let mut font_family: *mut GpFontFamily = std::ptr::null_mut();
+            if GdipCreateFontFamilyFromName(PCWSTR(font_name.as_ptr()), std::ptr::null_mut(), &mut font_family) == Status(0) {
+                let _ = GdipDeleteFontFamily(font_family);
+            }
+            log_debug("GDI+ font cache pre-warmed.");
+
+            // Load the 9-slice shadow image
+            let shadow_path = window::wide_string("src\\assets\\drop_shadow.png");
+            if GdipLoadImageFromFile(PCWSTR(shadow_path.as_ptr()), &mut SHADOW_IMAGE) == Status(0) {
+                log_debug("Loaded drop_shadow.png successfully");
+            } else {
+                log_debug("Failed to load drop_shadow.png");
+            }
         } else {
             log_debug(&format!("Failed to initialize GDI+: {:?}", result));
         }
