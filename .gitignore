@@ -24,4 +24,11 @@ target
 # Added by cargo
 
 /target
+
+# Claude security review
 .claude/settings.local.json
+.claude/
+
+# Internal documentation and scratchpad
+CHANGELOG.md
+README.md
